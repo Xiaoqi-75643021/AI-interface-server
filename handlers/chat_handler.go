@@ -1,17 +1,17 @@
 package handlers
 
 import (
-	"bytes"
-	"chat-api-server/config"
+    "chat-api-server/config"
 	"chat-api-server/ernie-bot-wrapper/baidu"
 	"chat-api-server/openai-wrapper/openai"
 	"chat-api-server/utils"
-	"encoding/json"
-	"fmt"
-	"io"
-	"log"
+    
 	"net/http"
-	"os"
+	"encoding/json"
+	"bytes"
+	"io"
+    
+	"fmt"
 )
 
 func ChatHandler(cfg *config.Configuration) http.HandlerFunc {
@@ -23,7 +23,8 @@ func ChatHandler(cfg *config.Configuration) http.HandlerFunc {
 
         // This struct is used to determine which service to route to
         type ServiceRequest struct {
-            Service string `json:"service"`
+            Service         string `json:"service"`
+            InterfaceName   string `json:"interface_name"`
         }
 
         // Read the entire request body
@@ -47,21 +48,40 @@ func ChatHandler(cfg *config.Configuration) http.HandlerFunc {
         // Create a new buffer with the same content for the specific handler
         handlerBody := io.NopCloser(bytes.NewBuffer(bodyBytes))
 
+        // Find the service config for the requested service
+        serviceConfig, err := findServiceConfig(cfg, serviceReq.Service, serviceReq.InterfaceName)
+        if err != nil {
+            http.Error(w, err.Error(), http.StatusBadRequest)
+            return
+        }
+
         switch serviceReq.Service {
-        case "openai":
-            // Call the OpenAI chat handler code with the new buffer
-            OpenAIChatHandler(cfg, w, handlerBody)
-        case "baidu":
-            // Call the Baidu chat handler code with the new buffer
-            BaiduChatHandler(cfg, w, handlerBody)
+        case "OpenAI":
+            OpenAIChatHandler(serviceConfig, w, handlerBody)
+        case "Baidu":
+            BaiduChatHandler(serviceConfig, w, handlerBody)
         default:
             http.Error(w, "Service not supported", http.StatusBadRequest)
         }
     }
 }
 
+// findServiceConfig finds the service config for a given service and interface name
+func findServiceConfig(cfg *config.Configuration, serviceName, interfaceName string) (*config.Service, error) {
+    for _, api := range cfg.APIs {
+        if api.Name == serviceName {
+            for _, service := range api.Categories["Chat"] {
+                if service.InterfaceName == interfaceName {
+                    return &service, nil
+                }
+            }
+        }
+    }
+    return nil, fmt.Errorf("service or interface not found")
+}
+
 // OpenAIChatHandler handles chat requests for the OpenAI service
-func OpenAIChatHandler(cfg *config.Configuration, w http.ResponseWriter, body io.ReadCloser) {
+func OpenAIChatHandler(serviceConfig *config.Service, w http.ResponseWriter, body io.ReadCloser) {
     var chatRequest openai.ChatRequest
     if err := json.NewDecoder(body).Decode(&chatRequest); err != nil {
         http.Error(w, err.Error(), http.StatusBadRequest)
@@ -69,13 +89,13 @@ func OpenAIChatHandler(cfg *config.Configuration, w http.ResponseWriter, body io
     }
 
     // Check if the requested model is in the list of available models
-    if _, exists := cfg.OpenAI.ModelsList[chatRequest.Model]; !exists {
+    if _, exists := serviceConfig.ModelsList[chatRequest.Model]; !exists {
         http.Error(w, "Model not supported", http.StatusBadRequest)
         return
     }
 
-    client := openai.NewClient(cfg.OpenAI.APIKey, cfg.OpenAI.APIURL)
-    chatResponse, err := client.Chat(&chatRequest, log.New(os.Stderr, "LOG: ", log.LstdFlags))
+    client := openai.NewClient(serviceConfig.APIKey, serviceConfig.APIURL)
+    chatResponse, err := client.Chat(&chatRequest)
     if err != nil {
         http.Error(w, err.Error(), http.StatusInternalServerError)
         return
@@ -88,7 +108,7 @@ func OpenAIChatHandler(cfg *config.Configuration, w http.ResponseWriter, body io
 }
 
 // BaiduChatHandler handles chat requests for the Baidu service
-func BaiduChatHandler(cfg *config.Configuration, w http.ResponseWriter, body io.ReadCloser) {
+func BaiduChatHandler(serviceConfig *config.Service, w http.ResponseWriter, body io.ReadCloser) {
     // Define a new struct that matches the expected request body
     type BaiduServiceRequest struct {
         Messages []baidu.Message `json:"messages"`
@@ -102,13 +122,13 @@ func BaiduChatHandler(cfg *config.Configuration, w http.ResponseWriter, body io.
 
     messages := serviceRequest.Messages
 
-    accessToken, err := utils.GetAccessToken(cfg.Baidu.BaseURL, cfg.Baidu.APIKey, cfg.Baidu.SecretKey)
+    accessToken, err := utils.GetAccessToken(serviceConfig.APIURL, serviceConfig.APIKey, serviceConfig.SecretKey)
     if err != nil {
         http.Error(w, "Error getting access token", http.StatusInternalServerError)
         return
     }
 
-    client := baidu.NewClient(cfg.Baidu.BaseURL, accessToken)
+    client := baidu.NewClient(serviceConfig.APIURL, accessToken)
     chatResponse, err := client.Chat(messages)
     if err != nil {
         http.Error(w, "Error during chat", http.StatusInternalServerError)
